@@ -12,13 +12,25 @@ crate-type = ["cdylib"]
 default = ["console_error_panic_hook"]
 
 [dependencies]
-bfv = {git = "https://github.com/Janmajayamall/bfv.git", features=["serialize", "std"], branch = "wasm"}
-traits =  {git = "https://github.com/Janmajayamall/bfv.git", branch = "wasm"}
+bfv = { git = "https://github.com/Janmajayamall/bfv.git", features = [
+    "serialize",
+    "std",
+], rev = "0bc0446cfcd4902732f6b20e71dda12d15d7c9e8" }
+traits = { git = "https://github.com/Janmajayamall/bfv.git", rev = "0bc0446cfcd4902732f6b20e71dda12d15d7c9e8" }
 rand = "0.8.5"
 itertools = "0.10.5"
 wasm-bindgen = "0.2"
 serde = { version = "1.0", features = ["derive"] }
 serde-wasm-bindgen = "0.4"
+x25519-dalek = { version = "2.0.1", features = ["serde", "static_secrets"] }
+rand_chacha = "0.3.1"
+bfv-gkr = { git = "https://github.com/nulltea/hyper-greco", branch = "cursive" }
+bfv-witgen = { git = "https://github.com/nulltea/hyper-greco", branch = "cursive", features = [
+    "sanity-check",
+] }
+num-bigint = "0.4"
+num-traits = "0.2"
+goldilocks = { git = "https://github.com/han0110/goldilocks", branch = "feature/qe_op_b" }
 
 
 # The `console_error_panic_hook` crate provides better debugging of panics by
@@ -30,3 +42,14 @@ console_error_panic_hook = { version = "0.1.7", optional = true }
 [profile.release]
 # Tell `rustc` to optimize for small code size.
 opt-level = "s"
+
+[patch."https://github.com/Janmajayamall/bfv.git"]
+bfv = { git = "https://github.com/nulltea/bfv.git", branch = "greco-wasm" }
+traits = { git = "https://github.com/nulltea/bfv.git", branch = "greco-wasm" }
+
+# [patch."https://github.com/nulltea/hyper-greco.git"]
+# bfv-gkr = { path = "../../gkreco/bfv-gkr" }
+# bfv-witgen = { path = "../../gkreco/bfv-witgen" }
+
+[patch."https://github.com/han0110/goldilocks"]
+goldilocks = { git = "https://github.com/nulltea/goldilocks", branch = "wasm" }

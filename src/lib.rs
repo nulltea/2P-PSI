@@ -1,18 +1,21 @@
 use bfv::{
-    BfvParameters, CiphertextProto, CollectiveDecryption, CollectiveDecryptionShare,
-    CollectiveDecryptionShareProto, CollectivePublicKeyGenerator, CollectivePublicKeyShareProto,
-    CollectiveRlkAggTrimmedShare1Proto, CollectiveRlkGenerator, CollectiveRlkShare1Proto,
-    CollectiveRlkShare2Proto, Encoding, EvaluationKey, Evaluator, Plaintext, SecretKey,
-    SecretKeyProto,
+    BfvParameters, CiphertextProto, CollectiveDecryption, CollectiveDecryptionShare, CollectiveDecryptionShareProto, CollectivePublicKeyGenerator, CollectivePublicKeyShareProto, CollectiveRlkAggTrimmedShare1Proto, CollectiveRlkGenerator, CollectiveRlkShare1Proto, CollectiveRlkShare2Proto, Encoding, EncodingType, EvaluationKey, Evaluator, Plaintext, PolyCache, SecretKey, SecretKeyProto
 };
+use bfv_gkr::sk_encryption_circuit::BfvEncrypt;
+use goldilocks::{Goldilocks, GoldilocksExt2};
 use itertools::{izip, Itertools};
-use rand::thread_rng;
+use num_bigint::BigInt;
+use num_traits::FromPrimitive;
+use rand::{rngs::StdRng, thread_rng, RngCore, SeedableRng};
+use rand_chacha::ChaCha8Rng;
 use serde::{Deserialize, Serialize};
 use traits::{
     TryDecodingWithParameters, TryEncodingWithParameters, TryFromWithLevelledParameters,
     TryFromWithParameters,
 };
 use wasm_bindgen::{prelude::wasm_bindgen, JsValue};
+
+use x25519_dalek::{EphemeralSecret, PublicKey, StaticSecret};
 
 mod bandwidth_benches;
 
@@ -33,18 +36,25 @@ fn params() -> BfvParameters {
     params
 }
 
+fn greco_circuit_modulus() -> BigInt {
+    // Goldilocks prime
+    BigInt::from_u64(18446744069414584321).unwrap()
+}
+
 /************* GENERATING KEYS *************/
 
 #[derive(Serialize, Deserialize)]
 struct PsiKeys {
     s: SecretKeyProto,
     s_rlk: SecretKeyProto,
+    dh_secret: StaticSecret,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
 struct MessageRound1 {
     share_pk: CollectivePublicKeyShareProto,
     share_rlk1: CollectiveRlkShare1Proto,
+    dh_public: PublicKey,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -69,14 +79,19 @@ fn gen_keys() -> GenKeysOutput {
     let share_rlk1 =
         CollectiveRlkGenerator::generate_share_1(&params, &s, &s_rlk, CRS_RLK, 0, &mut rng);
 
+    let dh_secret = StaticSecret::random_from_rng(&mut rng);
+    let dh_public = PublicKey::from(&dh_secret);
+
     GenKeysOutput {
         psi_keys: PsiKeys {
             s: convert(&s, &params),
             s_rlk: convert(&s_rlk, &params),
+            dh_secret,
         },
         message_round1: MessageRound1 {
             share_pk: convert(&share_pk, &params),
             share_rlk1: convert(&share_rlk1, &params),
+            dh_public,
         },
     }
 }
@@ -98,6 +113,7 @@ struct StateRound2 {
 struct MessageRound2 {
     share_rlk2: CollectiveRlkShare2Proto,
     cts: Vec<CiphertextProto>,
+    proofs: Vec<Vec<u8>>,
 }
 
 #[wasm_bindgen]
@@ -158,14 +174,57 @@ fn round1(
         &mut rng,
     );
 
+    let dh_shared = psi_keys.dh_secret.diffie_hellman(&other_message.dh_public);
+    let sk = {
+        let mut rng = ChaCha8Rng::from_seed(dh_shared.to_bytes());
+        SecretKey::random_with_params(&params, &mut rng)
+    };
+
+    let bounds = bfv_witgen::witness_bounds(&params).unwrap();
+    // println!("bounds: {:?}", bounds);
+
+    let bfv = BfvEncrypt::new(params.clone(), bounds, 1); //params.ciphertext_moduli.len());
+
+    let gkr_pk = bfv.setup::<Goldilocks, GoldilocksExt2>();
+    let gkr_circuit = bfv.build_circuit(gkr_pk);
+
+    let mut ciphertexts = vec![];
+    let mut gkr_proofs = vec![];
+
     // encrypt bit vector
-    let ciphertexts = bit_vector
-        .chunks(RING_SIZE)
-        .map(|v| {
-            let pt = Plaintext::try_encoding_with_parameters(v, &params, Encoding::default());
-            collective_pk.encrypt(&params, &pt, &mut rng)
-        })
-        .collect_vec();
+    for (i, v) in bit_vector.chunks(RING_SIZE).enumerate() {
+        let pt = Plaintext::try_encoding_with_parameters(
+            v,
+            &params,
+            Encoding {
+                encoding_type: EncodingType::Poly,
+                poly_cache: PolyCache::None,
+                level: 0,
+            },
+        );
+
+        // println!("i: {}", i);
+        // println!("v: {:?}", v);
+        let (ct, wit) = bfv_witgen::encrypt_with_witness(
+            &params,
+            &sk,
+            pt.clone(),
+            &mut rng,
+            &greco_circuit_modulus(),
+        )
+        .unwrap();
+
+        let gkr_proof = bfv.prove::<Goldilocks, GoldilocksExt2>(&wit, &gkr_circuit);
+
+        let ct0is = bfv_witgen::ct0_witness(&params, &ct, &greco_circuit_modulus());
+        assert_eq!(ct0is, wit.ct0is);
+        bfv.verify::<Goldilocks, GoldilocksExt2>(&gkr_circuit, ct0is, &gkr_proof);
+        // println!("-----------------");
+
+        let pt = Plaintext::try_encoding_with_parameters(v, &params, Encoding::default());
+        ciphertexts.push(collective_pk.encrypt(&params, &pt, &mut rng)); // TODO: change this to ct
+        gkr_proofs.push(gkr_proof);
+    }
 
     Round1Output {
         state_round2: StateRound2 {
@@ -177,6 +236,7 @@ fn round1(
                 .iter()
                 .map(|v| convert(v, &params))
                 .collect_vec(),
+            proofs: gkr_proofs,
         },
     }
 }
@@ -358,7 +418,8 @@ where
 mod tests {
     use super::*;
 
-    use itertools::{izip, Itertools};
+    use bfv::Ciphertext;
+    use itertools::{chain, izip, Itertools};
     use rand::{distributions::Uniform, Rng};
 
     fn random_bit_vector(hamming_weight: usize, size: usize) -> Vec<u32> {
@@ -403,6 +464,30 @@ mod tests {
             gen_keys_output_a.message_round1,
             &bit_vector_b,
         );
+
+        {
+            let params = params();
+            let bounds = bfv_witgen::witness_bounds(&params).unwrap();
+            let bfv = BfvEncrypt::new(params.clone(), bounds, params.ciphertext_moduli.len());
+
+            let vk = bfv.setup::<Goldilocks, GoldilocksExt2>();
+            let gkr_circuit = bfv.build_circuit(vk);
+
+            for (ct, proof) in chain![
+                izip!(
+                    &round1_output_a.message_round2.cts,
+                    &round1_output_a.message_round2.proofs
+                ),
+                izip!(
+                    &round1_output_b.message_round2.cts,
+                    &round1_output_b.message_round2.proofs
+                )
+            ] {
+                let ct = Ciphertext::try_from_with_parameters(ct, &params);
+                let ct0is = bfv_witgen::ct0_witness(&params, &ct, &greco_circuit_modulus());
+                bfv.verify::<Goldilocks, GoldilocksExt2>(&gkr_circuit, ct0is, proof);
+            }
+        }
 
         // round2
         let round2_output_a = round2(
