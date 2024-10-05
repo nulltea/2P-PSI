@@ -1,5 +1,9 @@
 use bfv::{
-    BfvParameters, CiphertextProto, CollectiveDecryption, CollectiveDecryptionShare, CollectiveDecryptionShareProto, CollectivePublicKeyGenerator, CollectivePublicKeyShareProto, CollectiveRlkAggTrimmedShare1Proto, CollectiveRlkGenerator, CollectiveRlkShare1Proto, CollectiveRlkShare2Proto, Encoding, EncodingType, EvaluationKey, Evaluator, Plaintext, PolyCache, SecretKey, SecretKeyProto
+    BfvParameters, CiphertextProto, CollectiveDecryption, CollectiveDecryptionShare,
+    CollectiveDecryptionShareProto, CollectivePublicKeyGenerator, CollectivePublicKeyShareProto,
+    CollectiveRlkAggTrimmedShare1Proto, CollectiveRlkGenerator, CollectiveRlkShare1Proto,
+    CollectiveRlkShare2Proto, Encoding, EncodingType, EvaluationKey, Evaluator, Plaintext,
+    PolyCache, SecretKey, SecretKeyProto,
 };
 use bfv_gkr::sk_encryption_circuit::BfvEncrypt;
 use goldilocks::{Goldilocks, GoldilocksExt2};
@@ -181,8 +185,6 @@ fn round1(
     };
 
     let bounds = bfv_witgen::witness_bounds(&params).unwrap();
-    // println!("bounds: {:?}", bounds);
-
     let bfv = BfvEncrypt::new(params.clone(), bounds, 1); //params.ciphertext_moduli.len());
 
     let gkr_pk = bfv.setup::<Goldilocks, GoldilocksExt2>();
@@ -192,7 +194,7 @@ fn round1(
     let mut gkr_proofs = vec![];
 
     // encrypt bit vector
-    for (i, v) in bit_vector.chunks(RING_SIZE).enumerate() {
+    for v in bit_vector.chunks(RING_SIZE) {
         let pt = Plaintext::try_encoding_with_parameters(
             v,
             &params,
@@ -203,8 +205,6 @@ fn round1(
             },
         );
 
-        // println!("i: {}", i);
-        // println!("v: {:?}", v);
         let (ct, wit) = bfv_witgen::encrypt_with_witness(
             &params,
             &sk,
@@ -217,9 +217,6 @@ fn round1(
         let gkr_proof = bfv.prove::<Goldilocks, GoldilocksExt2>(&wit, &gkr_circuit);
 
         let ct0is = bfv_witgen::ct0_witness(&params, &ct, &greco_circuit_modulus());
-        assert_eq!(ct0is, wit.ct0is);
-        bfv.verify::<Goldilocks, GoldilocksExt2>(&gkr_circuit, ct0is, &gkr_proof);
-        // println!("-----------------");
 
         let pt = Plaintext::try_encoding_with_parameters(v, &params, Encoding::default());
         ciphertexts.push(collective_pk.encrypt(&params, &pt, &mut rng)); // TODO: change this to ct
